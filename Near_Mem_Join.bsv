@@ -68,7 +68,7 @@ module mkNear_Mem_Join (Near_Mem_IFC);
    rule rl_forward_imem (w_imem_req_active);
       let req = ug_imem_req_source.peek;
       ug_imem_req_source.drop;
-      let dest = inRange (soc_map.m_tcm_addr_range, req.addr) ? TCM
+      let dest = inRange (soc_map.m_tcm_addr_range, zeroExtend (req.addr)) ? TCM
                                                             : CACHES;
       rg_imem_dest <= dest;
       (fn_sel_cache_or_tcm_imem (dest)).req ( req.f3
@@ -93,7 +93,7 @@ module mkNear_Mem_Join (Near_Mem_IFC);
    rule rl_forward_dmem;
       let req = f_dmem_req.first;
       f_dmem_req.deq;
-      let dest = inRange (soc_map.m_tcm_addr_range, req.addr) ? TCM
+      let dest = inRange (soc_map.m_tcm_addr_range, zeroExtend (req.addr)) ? TCM
                                                               : CACHES;
       rg_dmem_dest <= dest;
       fn_sel_cache_or_tcm_dmem (dest).req ( req.op
@@ -229,7 +229,7 @@ module mkNear_Mem_Join (Near_Mem_IFC);
                          , Bit #(5) amo_funct5
 `endif
                          , Addr addr
-                         , Tuple2#(Bool, Bit #(128)) store_value
+                         , Tuple2#(Bool, Bit #(XLEN_2)) store_value
                            // The following  args for VM
 `ifdef ISA_PRIV_S
                          , Priv_Mode  priv
@@ -265,11 +265,11 @@ module mkNear_Mem_Join (Near_Mem_IFC);
       endmethod
 
       // CPU side: DMem response
-      method Bool                      valid      = fn_sel_cache_or_tcm_dmem (rg_dmem_dest).valid;
-      method Tuple2#(Bool, Bit #(128)) word128    = fn_sel_cache_or_tcm_dmem (rg_dmem_dest).word128;      // Load-value
-      method Bit #(128)                st_amo_val = fn_sel_cache_or_tcm_dmem (rg_dmem_dest).st_amo_val;  // Final store-value for ST, SC, AMO
-      method Bool                      exc        = fn_sel_cache_or_tcm_dmem (rg_dmem_dest).exc;
-      method Exc_Code                  exc_code   = fn_sel_cache_or_tcm_dmem (rg_dmem_dest).exc_code;
+      method Bool                         valid      = fn_sel_cache_or_tcm_dmem (rg_dmem_dest).valid;
+      method Tuple2#(Bool, Bit #(XLEN_2)) word128    = fn_sel_cache_or_tcm_dmem (rg_dmem_dest).word128;      // Load-value
+      method Bit #(XLEN_2)                st_amo_val = fn_sel_cache_or_tcm_dmem (rg_dmem_dest).st_amo_val;  // Final store-value for ST, SC, AMO
+      method Bool                         exc        = fn_sel_cache_or_tcm_dmem (rg_dmem_dest).exc;
+      method Exc_Code                     exc_code   = fn_sel_cache_or_tcm_dmem (rg_dmem_dest).exc_code;
 
 `ifdef PERFORMANCE_MONITORING
       method EventsCache events;

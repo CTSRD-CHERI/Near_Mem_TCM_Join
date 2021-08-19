@@ -226,7 +226,7 @@ function Bit #(addr_) fv_cpu_addr_to_local_addr (WordXL addr, Integer data_);
 endfunction
 
 function Bit #(be_) fv_req_to_byte_mask (MMU_Cache_Req req)
-   provisos (Add#(a__, TLog#(be_), 64));
+   provisos (Add#(a__, TLog#(be_), XLEN));
    Bit #(TLog #(be_)) offset = truncate (req.va);
    Bit #(be_) mask = ~(~0 << (1 << (req.width_code)));
    mask = mask << offset;
@@ -307,10 +307,11 @@ module mkIDTCM_AXI #(Bit #(2) i_verbosity, Bit #(2) d_verbosity)
                     (IDTCM_AXI_IFC #( sid_, addr_, data_
                                     , awuser_, wuser_, buser_
                                     , aruser_, ruser_))
-                    provisos ( Add #(a__, data_, 128)
-                             , Add #(b__, addr_, 64)
-                             , Add #(c__, TLog#(data_), 64)
+                    provisos ( Add #(a__, data_, XLEN_2)
+                             , Add #(b__, XLEN, addr_)
+                             , Add #(c__, TLog#(data_), XLEN)
                              , Add #(d__, TLog#(data_), addr_)
+                             , Add #(e__, data_, 128)
                              );
 `ifdef ISA_CHERI
 `ifdef RV64
@@ -390,8 +391,71 @@ module mkIDTCM_AXI #(Bit #(2) i_verbosity, Bit #(2) d_verbosity)
 `ifndef RV64
 `ifdef RVFI_DII
    // ISA_CHERI, no RV64, RVFI_DII
+   // want to use mem_model as the primitive for this since it has reset
+   Integer words_per_bram = valueOf (Words_per_BRAM);
+   Integer addr_sz = log2(words_per_bram);
+   Vector #(2, Vector #(4, Mem_Model_Gen_IFC #( TLog #(Words_per_BRAM)
+                                              , 8
+                                              , 0, TSub #(Words_per_BRAM, 1)
+                                              , 0, 0
+                                              )))
+      v_v_mem_models = newVector;
+   for (Integer i = 0; i < 2; i = i+1) begin
+      Vector #(4, Mem_Model_Gen_IFC #( TLog #(Words_per_BRAM)
+                                     , 8
+                                     , 0, TSub #(Words_per_BRAM, 1)
+                                     , 0, 0
+                                     ))
+         v_mem_models = newVector;
+      for (Integer j = 0; j < 4; j = j+1) begin
+         v_mem_models[j] <- mkMem_Model_General (words_per_bram);
+      end
+      v_v_mem_models[i] = v_mem_models;
+   end
+   Vector #(2, BRAM_PORT_BE #(Bit #(TLog #(Words_per_BRAM)), Bit #(32), 4)) v_brams = newVector;
+   for (Integer i = 0; i < 2; i = i+1) begin
+      v_brams[i] <- mkBRAM_from_Mem_Models (v_v_mem_models[i]);
+   end
+
+   Vector #(1, Mem_Model_Gen_IFC #( TLog #(Words_per_BRAM)
+                                  , 8
+                                  , 0, TSub #(Words_per_BRAM, 1)
+                                  , 0, 0
+                                  ))
+      v_tag_models = newVector;
+   v_tag_models[0] <- mkMem_Model_General (words_per_bram);
+   Vector #(1, BRAM_PORT_BE #(Bit #(TLog #(Words_per_BRAM)), Bit #(8), 1)) v_tag_brams = newVector;
+   v_tag_brams[0] <- mkBRAM_from_Mem_Models (v_tag_models);
+
+
+   let dport <- mkMergeBRAMs (v_brams, v_tag_brams);
+
+   BRAM_PORT_BE #(Bit #(32), Bit #(72), 17) iport <- mkDummyBRAM;
 `else
    // ISA_CHERI, no RV64, no RVFI_DII
+   // TODO this has been copy-pasted from above
+   Integer words_per_bram = valueOf (Words_per_BRAM);
+   Integer addr_sz = log2 (words_per_bram);
+
+   Vector #(2, BRAM_DUAL_PORT_BE #(Bit #(TLog #(Words_per_BRAM)), Bit #(32), 4)) v_brams = newVector;
+   for (Integer i = 0; i < 4; i = i+1) begin
+`ifdef BRAM_LOAD
+      v_brams[i] <- mkBRAMCore2BELoad (words_per_bram, False, "Mem-TCM-" + integerToString(i) + ".hex", False);
+`else
+      v_brams[i] <- mkBRAMCore2BE (words_per_bram, False);
+`endif
+   end
+
+   Vector #(1, BRAM_DUAL_PORT_BE #(Bit #(TLog #(Words_per_BRAM)), Bit #(8), 1)) v_tag_brams = newVector;
+`ifdef BRAM_LOAD
+   v_tag_brams[0] <- mkBRAMCore2BELoad (words_per_bram, False, "Mem-TCM-tags-0.hex", False);
+`else
+   v_tag_brams[0] <- mkBRAMCore2BE (words_per_bram, False);
+`endif
+
+   let tcm <- mkMergeDualPortBRAMs (v_brams, v_tag_brams);
+   let dport = tcm.a;
+   let iport = tcm.b;
 `endif
 `endif
 `endif
@@ -447,28 +511,36 @@ module mkIDTCM_AXI #(Bit #(2) i_verbosity, Bit #(2) d_verbosity)
 endmodule
 
 
-module mkMergeDualPortBRAMs #( Vector #(4, BRAM_DUAL_PORT_BE #(Bit #(addr_), Bit #(32), 4)) data_ports
-                             , Vector #(1, BRAM_DUAL_PORT_BE #(Bit #(addr_), Bit #( 8), 1)) tag_ports)
+module mkMergeDualPortBRAMs #( Vector #(n_data_, BRAM_DUAL_PORT_BE #(Bit #(addr_), Bit #(data_), TDiv #(data_, SizeOf #(Byte)))) data_ports
+                             , Vector #(n_tags_, BRAM_DUAL_PORT_BE #(Bit #(addr_), Bit #(tags_), TDiv #(tags_, SizeOf #(Byte)))) tag_ports)
                              (BRAM_DUAL_PORT_BE #( Bit #(addr_)
                                                  , Bit #(total_data_)
                                                  , total_be_))
-                             provisos ( NumAlias #(total_data_, TAdd #(TMul #(32, 4), TMul #(8, 1)))
-                                      , NumAlias #(total_be_  , TAdd #(TMul #( 4, 4), TMul #(1, 1))));
-   Vector #(4, BRAM_PORT_BE #(Bit #(addr_), Bit #(32), 4)) a_data_ports = newVector;
-   for (Integer i = 0; i < 4; i = i+1) begin
+                             provisos ( NumAlias #(total_data_, TAdd #(TMul #(data_, n_data_), TMul #(tags_, n_tags_)))
+                                      , NumAlias #(total_be_  , TAdd #( TMul #(TDiv #(data_, SizeOf #(Byte)), n_data_)
+                                                                      , TMul #(TDiv #(tags_, SizeOf #(Byte)), n_tags_)))
+                                      // total_data_ has to be bigger than tags_ and data_
+                                      , Add#(a__, tags_, total_data_)
+                                      , Add#(b__, data_, total_data_)
+                                      // bsc-suggested provisos
+                                      //, Add#(TMul#(TDiv#(data_, 8), n_data_), TMul#(TDiv#(tags_, 8), n_tags_)
+                                      //, TAdd#(TMul#(4, n_data_), TMul#(1, n_tags_)))
+                                      );
+   Vector #(n_data_, BRAM_PORT_BE #(Bit #(addr_), Bit #(data_), TDiv #(data_, SizeOf #(Byte)))) a_data_ports = newVector;
+   for (Integer i = 0; i < valueOf (n_data_); i = i+1) begin
       a_data_ports[i] = data_ports[i].a;
    end
-   Vector #(1, BRAM_PORT_BE #(Bit #(addr_), Bit #(8), 1)) a_tag_ports = newVector;
-   for (Integer i = 0; i < 1; i = i+1) begin
+   Vector #(n_tags_, BRAM_PORT_BE #(Bit #(addr_), Bit #(tags_), TDiv #(tags_, SizeOf #(Byte)))) a_tag_ports = newVector;
+   for (Integer i = 0; i < valueOf (n_tags_); i = i+1) begin
       a_tag_ports[i] = tag_ports[i].a;
    end
 
-   Vector #(4, BRAM_PORT_BE #(Bit #(addr_), Bit #(32), 4)) b_data_ports = newVector;
-   for (Integer i = 0; i < 4; i = i+1) begin
+   Vector #(n_data_, BRAM_PORT_BE #(Bit #(addr_), Bit #(data_), TDiv #(data_, SizeOf #(Byte)))) b_data_ports = newVector;
+   for (Integer i = 0; i < valueOf (n_data_); i = i+1) begin
       b_data_ports[i] = data_ports[i].b;
    end
-   Vector #(1, BRAM_PORT_BE #(Bit #(addr_), Bit #(8), 1)) b_tag_ports = newVector;
-   for (Integer i = 0; i < 1; i = i+1) begin
+   Vector #(n_tags_, BRAM_PORT_BE #(Bit #(addr_), Bit #(tags_), TDiv #(tags_, SizeOf #(Byte)))) b_tag_ports = newVector;
+   for (Integer i = 0; i < valueOf (n_tags_); i = i+1) begin
       b_tag_ports[i] = tag_ports[i].b;
    end
 
@@ -491,8 +563,9 @@ module mkMergeBRAMs #( Vector #(n_data_, BRAM_PORT_BE #(Bit #(addr_), Bit #(data
                      provisos ( NumAlias #(total_data_, TAdd #(TMul #(data_, n_data_), TMul #(tags_, n_tags_)))
                               , NumAlias #(total_be_,   TAdd #( TMul #(TDiv #(data_, SizeOf #(Byte)), n_data_)
                                                               , TMul #(TDiv #(tags_, SizeOf #(Byte)), n_tags_)))
-                              , Add #(a__, data_, TAdd#(TMul#(data_, n_data_), TMul#(tags_, n_tags_)))
-                              , Add #(b__, tags_, TAdd#(TMul#(data_, n_data_), TMul#(tags_, n_tags_))));
+                              // total_data_ has to be bigger than data_ and tags_
+                              , Add #(a__, data_, total_data_)
+                              , Add #(b__, tags_, total_data_));
    Reg #(Bool) drg_req <- mkDReg (False);
    rule rl_debug (drg_req);
       $display ("%m mkMergeBRAMs -- read data:");
@@ -803,24 +876,24 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                                       , Add #(b__, b_data_only_, b_data_)
                                       , Add #(c__, TSub #(SizeOf #(CapMem), 1), b_data_only_)
                                       , Add #(d__, TLog#(b_data_only_), SizeOf #(Addr))
-                                      , Add #(e__, TLog#(caps_in_data_floor_), SizeOf #(WordXL))
-                                      , Add #(f__, TLog#(b_data_), SizeOf #(WordXL))
-                                      , Add #(g__, TLog#(b_be_), SizeOf #(WordXL))
-                                      , Add #(h__, 128, b_data_only_)
-                                      , Add #(i__, 64, b_data_only_)
+                                      , Add #(e__, TLog#(caps_in_data_floor_), XLEN)
+                                      , Add #(f__, TLog#(b_data_), XLEN)
+                                      , Add #(g__, TLog#(b_be_), XLEN)
+                                      , Add #(h__, XLEN_2, b_data_only_)
+                                      , Add #(i__, XLEN, b_data_only_)
                                       , Add #(j__, 32, b_data_only_)
                                       , Add #(k__, 16, b_data_only_)
                                       , Add #(l__, 8, b_data_only_)
                                       , Add #(m__, TDiv#(b_data_only_, SizeOf #(Byte)), b_be_)
-                                      , Add #(n__, TLog#(TDiv#(b_data_only_, SizeOf #(Byte))), 64)
-                                      , Add #(o__, TLog#(TSub#(b_data_, b_data_only_)), 64)
+                                      , Add #(n__, TLog#(TDiv#(b_data_only_, SizeOf #(Byte))), XLEN)
+                                      , Add #(o__, TLog#(TSub#(b_data_, b_data_only_)), XLEN)
                                       , Add #(p__, TLog#(TSub#(b_data_, b_data_only_)), TLog#(b_data_))
                                       , Add #(q__, TLog#(caps_in_data_floor_), TLog#(b_data_))
                                       , Add #(r__, data_, b_data_only_)
-                                      , Add #(s__, addr_, SizeOf #(WordXL))
+                                      , Add #(s__, XLEN, addr_)
                                       , Add #(t__, data_, 128)
                                       , Add #(u__, b_data_only_, 128)
-                                      , Add #(v__, TLog#(data_), 64)
+                                      , Add #(v__, TLog#(data_), XLEN)
                                       , Add #(w__, TLog#(data_), addr_)
                                       , Mul #(x__, SizeOf #(Byte), b_data_)
                                       , Add #(y__, SizeOf #(Byte), TMul#(x__, SizeOf #(Byte)))
@@ -849,9 +922,11 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
       end else if (f3 == 3'b011) begin
          Bit #(TMul #(SizeOf #(Byte), 8)) val = truncate (tcm_word >> low_bit);
          res = u_s_extend (val);
+`ifdef RV64
       end else if (f3 == 3'b100) begin
          Bit #(TMul #(SizeOf #(Byte), 16)) val = truncate (tcm_word >> low_bit);
          res = u_s_extend (val);
+`endif
       end
       return res;
    endfunction
@@ -867,7 +942,10 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
 
    function Tuple3 #(Bit #(b_be_), Bit #(b_addr_), Bit #(b_data_)) fv_mem_req_to_port_req (MMU_Cache_Req req);
       Bit #(TLog #(b_data_only_)) low_bit = truncate (req.va << valueOf (TLog #(SizeOf #(Byte))));
-      Bit #(b_data_) data = zeroExtend (tpl_2 (req.st_value) & fv_size_code_to_mask (req.width_code)) << low_bit;
+      // req.st_value has a hard-wired size of 128
+      // This means that in RV32 we will need to truncate to 64 bits before zeroExtending
+      Bit #(XLEN_2) st_val_data = truncate (tpl_2 (req.st_value));
+      Bit #(b_data_) data = zeroExtend (st_val_data & fv_size_code_to_mask (req.width_code)) << low_bit;
       // Which tag bit we are setting; only considers the bits dedicated for tags
       Bit #(TLog #(caps_in_data_floor_)) tag_bit = truncate (req.va >> valueOf (TLog #(TDiv #(TSub #(SizeOf #(CapMem), 1), SizeOf #(Byte)))));
       // Which bit inside the entire b_data_ element is the tag bit that we are setting
@@ -914,7 +992,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
    Reg #(Bool) crg_store_accepted[2] <- mkCReg (2, False);
    Reg #(WordXL) rg_store_addr <- mkRegU;
    Reg #(Bit #(3)) rg_store_width_code <- mkRegU;
-   Reg #(Tuple2 #(Bool, Bit #(128))) rg_store_val <- mkRegU;
+   Reg #(Tuple2 #(Bool, Bit #(XLEN_2))) rg_store_val <- mkRegU;
    Reg #(Bool) drg_read_from_buffer <- mkDReg (False);
 
 `ifdef WATCH_TOHOST
@@ -977,10 +1055,10 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
       if (ug_axi_master.ar.canPeek) begin
          let arreq = ug_axi_master.ar.peek;
          // read request
-         Bit #(b_addr_) local_addr = fv_cpu_addr_to_local_addr (zeroExtend (arreq.araddr), valueOf (b_data_only_));
+         Bit #(b_addr_) local_addr = fv_cpu_addr_to_local_addr (truncate (arreq.araddr), valueOf (b_data_only_));
          let min_req = MMU_Cache_Req { op: CACHE_ST
                                      , width_code: pack (arreq.arsize)
-                                     , va: zeroExtend (arreq.araddr)
+                                     , va: truncate (arreq.araddr)
                                      };
          port.put (0, local_addr, ?);
          drg_axi_rsp_r <= True;
@@ -1002,10 +1080,10 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
          Bit #(TLog #(data_)) data_rshift_amt = truncate (awreq.awaddr << 3);
          let min_req = MMU_Cache_Req { op: CACHE_ST
                                      , width_code: pack (awreq.awsize)
-                                     , va: zeroExtend (awreq.awaddr)
+                                     , va: truncate (awreq.awaddr)
                                      , st_value: tuple2(False, zeroExtend (wreq.wdata >> data_rshift_amt))
                                      };
-         Bit #(b_addr_) local_addr = fv_cpu_addr_to_local_addr (zeroExtend (awreq.awaddr), valueOf (b_data_only_));
+         Bit #(b_addr_) local_addr = fv_cpu_addr_to_local_addr (truncate (awreq.awaddr), valueOf (b_data_only_));
          let write_tuple = fv_mem_req_to_port_req (min_req);
          port.put (tpl_1 (write_tuple), tpl_2 (write_tuple), tpl_3 (write_tuple));
          drg_axi_rsp_w <= True;
@@ -1155,13 +1233,15 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             // store that is currently in the buffer can execute now
             crg_store_pending[1] <= do_write;
             rg_store_addr <= dw_req.va;
-            rg_store_val <= dw_req.st_value;
+            Tuple2 #(Bool, Bit #(XLEN_2)) new_rg_store_val = tuple2 (tpl_1 (dw_req.st_value), truncate (tpl_2 (dw_req.st_value)));
+            rg_store_val <= new_rg_store_val;
             rg_store_width_code <= dw_req.width_code;
             if (verbosity > 0) begin
                $display ("    adding new store to buffer");
                $display ("    do_write: ", fshow (do_write));
                $display ("    addr: ", fshow (dw_req.va));
                $display ("    st_value: ", fshow (dw_req.st_value));
+               $display ("    new st_value: ", fshow (new_rg_store_val));
                $display ("    width_code: ", fshow (dw_req.width_code));
             end
 
@@ -1216,7 +1296,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
          end
 `endif
 `ifdef WATCH_TOHOST
-         if (rg_req.va == rg_tohost_addr && rg_watch_tohost) begin
+         if (zeroExtend (rg_req.va) == rg_tohost_addr && rg_watch_tohost) begin
             rg_tohost_value <= truncate (tpl_2(rg_req.st_value));
             $display (" TOHOST TRIGGER ");
          end
@@ -1256,7 +1336,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
       else begin
          // handle all other AMO requests
          if (dw_commit) begin
-            Tuple2 #(Bool, Bit #(128)) ld_val_cap = ?;
+            Tuple2 #(Bool, Bit #(XLEN_2)) ld_val_cap = ?;
             Bit #(b_addr_) store_local_addr = fv_cpu_addr_to_local_addr (rg_store_addr, valueOf (b_data_only_));
             if (dw_store_pending && local_addr == store_local_addr) begin
                ld_val_cap = rg_store_val;
@@ -1274,7 +1354,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                // after rl_handle_pending_store
                let tmp_req_old = MMU_Cache_Req { op: CACHE_ST
                                                , va: rg_store_addr
-                                               , st_value: rg_store_val
+                                               , st_value: tuple2 (tpl_1 (rg_store_val), zeroExtend (tpl_2 (rg_store_val)))
                                                , width_code: rg_store_width_code};
                let write_tuple_old = fv_mem_req_to_port_req (tmp_req_old);
                port.put (tpl_1 (write_tuple_old), tpl_2 (write_tuple_old), tpl_3 (write_tuple_old));
@@ -1287,7 +1367,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             match { .new_ld_val
                   , .new_st_val} = fv_amo_op ( rg_req.width_code
                                              , rg_req.amo_funct5
-                                             , ld_val_cap
+                                             , tuple2 (tpl_1 (ld_val_cap), zeroExtend (tpl_2 (ld_val_cap)))
                                              , rg_req.st_value);
             let tmp_req = rg_req;
             tmp_req.st_value = new_st_val;
@@ -1297,7 +1377,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             crg_store_accepted[1] <= True;
             rg_store_addr <= rg_req.va;
             rg_store_width_code <= rg_req.width_code;
-            rg_store_val <= new_st_val;
+            rg_store_val <= tuple2 (tpl_1 (new_st_val), truncate (tpl_2 (new_st_val)));
 
             if (verbosity > 0) begin
                //$display ("    committing other AMO request");
@@ -1319,7 +1399,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
       Bit #(b_data_) buffer_mask = ?;
       if (drg_read_from_buffer) begin
          let tmp_req = MMU_Cache_Req { va: rg_store_addr
-                                     , st_value: rg_store_val
+                                     , st_value: tuple2 (tpl_1 (rg_store_val), zeroExtend (tpl_2 (rg_store_val)))
                                      , width_code: rg_store_width_code
                                      , op: CACHE_ST
                                      };
@@ -1384,7 +1464,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
       // needs to wait for its commit signal
       let tmp_req = MMU_Cache_Req { op: CACHE_ST
                                   , va: rg_store_addr
-                                  , st_value: rg_store_val
+                                  , st_value: tuple2 (tpl_1 (rg_store_val), zeroExtend (tpl_2 (rg_store_val)))
                                   , width_code: rg_store_width_code};
       let write_tuple = fv_mem_req_to_port_req (tmp_req);
       port.put (tpl_1 (write_tuple), tpl_2 (write_tuple), tpl_3 (write_tuple));
@@ -1430,7 +1510,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
 `endif
                          , Addr addr
                          // TODO non-cheri, and 32-bit
-                         , Tuple2#(Bool, Bit #(128)) store_value
+                         , Tuple2#(Bool, Bit #(XLEN_2)) store_value
 `ifdef ISA_PRIV_S
                            // The following  args for VM
                          , Priv_Mode  priv
@@ -1447,7 +1527,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                                  , amo_funct5  : amo_funct5
 `endif
                                  , va          : addr
-                                 , st_value    : store_value
+                                 , st_value    : tuple2 (tpl_1 (store_value), zeroExtend (tpl_2 (store_value)))
 `ifdef ISA_PRIV_S
                                  , priv        : priv
                                  , sstatus_SUM : sstatus_SUM
@@ -1468,7 +1548,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
       // CPU side: DMem response
       method Bool       valid = dw_valid;
 `ifdef ISA_CHERI
-      method Tuple2#(Bool, Bit #(128))  word128;      // Load-value
+      method Tuple2#(Bool, Bit #(XLEN_2))  word128;      // Load-value
          let raw_data = dw_raw_output;
          let cap_tag = fv_extract_cap_tag (rg_req.va, raw_data);
          let data = fv_extract_bits (rg_req.va, rg_req.width_code, rg_req.is_unsigned, truncate(raw_data));
@@ -1479,7 +1559,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
 `endif
 
       // This is never used by the CPU
-      method Bit #(128)  st_amo_val;  // Final store-value for ST, SC, AMO
+      method Bit #(XLEN_2)  st_amo_val;  // Final store-value for ST, SC, AMO
          return ?;
       endmethod
 

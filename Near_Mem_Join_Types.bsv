@@ -25,7 +25,7 @@ typedef struct {
    Bit #(5) amo_funct5;
 `endif
    Addr   addr;
-   Tuple2 #(Bool, Bit #(128)) store_value;
+   Tuple2 #(Bool, Bit #(XLEN_2)) store_value;
 `ifdef ISA_PRIV_S
    Priv_Mod priv;
    Bit #(1) sstatus_SUM;
