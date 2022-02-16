@@ -312,6 +312,7 @@ module mkIDTCM_AXI #(Bit #(2) i_verbosity, Bit #(2) d_verbosity)
                              , Add #(c__, TLog#(data_), XLEN)
                              , Add #(d__, TLog#(data_), addr_)
                              , Add #(e__, data_, 128)
+                             , Add #(f__, 9, addr_)
                              );
 `ifdef ISA_CHERI
 `ifdef RV64
@@ -897,6 +898,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                                       , Add #(w__, TLog#(data_), addr_)
                                       , Mul #(x__, SizeOf #(Byte), b_data_)
                                       , Add #(y__, SizeOf #(Byte), TMul#(x__, SizeOf #(Byte)))
+                                      , Add #(z__, 9, addr_)
 
                                       // bsc required provisos
                                       //, Div#(TAdd#(TSub#(b_data_, SizeOf #(CapMem)), 1), SizeOf #(CapMem), 1)
@@ -980,11 +982,16 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
    Wire #(Bool) dw_exc <- mkDWire (False);
    Wire #(Exc_Code) dw_exc_code <- mkDWire (exc_code_LOAD_ADDR_MISALIGNED);
 
-   let axi_shim <- mkAXI4ShimFF;
-   let ug_axi_master <- toUnguarded_AXI4_Master (axi_shim.master);
+   AXI4_Shim #(sid_, addr_, data_, awuser, wuser, buser, aruser, ruser)
+      axi_shim <- mkAXI4ShimFF;
+   AXI4_Shim #(sid_, addr_, data_, awuser, wuser, buser, aruser, ruser)
+      axi_shim2 <- mkAXI4ShimBypassFIFOF;
+   mkConnection (axi_shim2.slave, axi_shim.master);
+   let ug_axi_master <- toUnguarded_AXI4_Master (axi_shim2.master);
    Reg #(Bool) drg_axi_rsp_w <- mkDReg (False);
    Reg #(Bool) drg_axi_rsp_r <- mkDReg (False);
    Reg #(Bit #(sid_)) rg_axi_id <- mkRegU;
+   Reg #(Bit #(TAdd #(SizeOf #(AXI4_Len), 1))) rg_axi_ctr <- mkReg (0);
 
    // We have a single-element store buffer to allow stores to take one cycle
    // while still using the commit signal
@@ -1051,20 +1058,28 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                                 && !crg_store_pending[0]
                                 && !dw_store_pending
                                 && ug_axi_master.b.canPut
-                                && ug_axi_master.r.canPut);
+                                && axi_shim.master.r.canPut);
       if (ug_axi_master.ar.canPeek) begin
          let arreq = ug_axi_master.ar.peek;
          // read request
-         Bit #(b_addr_) local_addr = fv_cpu_addr_to_local_addr (truncate (arreq.araddr), valueOf (b_data_only_));
+         let bus_addr = arreq.araddr + (zeroExtend (rg_axi_ctr) << pack (arreq.arsize));
+         Bit #(b_addr_) local_addr = fv_cpu_addr_to_local_addr (truncate (bus_addr), valueOf (b_data_only_));
          let min_req = MMU_Cache_Req { op: CACHE_ST
                                      , width_code: pack (arreq.arsize)
-                                     , va: truncate (arreq.araddr)
+                                     , va: truncate (bus_addr)
                                      };
          port.put (0, local_addr, ?);
          drg_axi_rsp_r <= True;
          rg_axi_id <= arreq.arid;
          rg_req <= min_req;
-         ug_axi_master.ar.drop;
+         let is_last = rg_axi_ctr == zeroExtend (arreq.arlen);
+         rg_axi_ctr <= is_last ? 0 : rg_axi_ctr + 1;
+         if (is_last) begin
+            ug_axi_master.ar.drop;
+            if (verbosity > 0) begin
+               $display ("    dropping ar");
+            end
+         end
 
          if (verbosity > 0) begin
             $display ("%m rl_handle_req_from_axi ar request");
@@ -1077,20 +1092,27 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
          let wreq = ug_axi_master.w.peek;
          // TODO this might be a bit wasteful; we right shift and then
          // left shift again later
-         Bit #(TLog #(data_)) data_rshift_amt = truncate (awreq.awaddr << 3);
+         let bus_addr = awreq.awaddr + zeroExtend (rg_axi_ctr << pack (awreq.awsize));
+         Bit #(TLog #(data_)) data_rshift_amt = truncate (bus_addr << 3);
          let min_req = MMU_Cache_Req { op: CACHE_ST
                                      , width_code: pack (awreq.awsize)
-                                     , va: truncate (awreq.awaddr)
+                                     , va: truncate (bus_addr)
                                      , st_value: tuple2(False, zeroExtend (wreq.wdata >> data_rshift_amt))
                                      };
          Bit #(b_addr_) local_addr = fv_cpu_addr_to_local_addr (truncate (awreq.awaddr), valueOf (b_data_only_));
          let write_tuple = fv_mem_req_to_port_req (min_req);
          port.put (tpl_1 (write_tuple), tpl_2 (write_tuple), tpl_3 (write_tuple));
-         drg_axi_rsp_w <= True;
          rg_axi_id <= awreq.awid;
          rg_req <= min_req;
-         ug_axi_master.aw.drop;
          ug_axi_master.w.drop;
+
+         if (truncate (rg_axi_ctr) == awreq.awlen) begin
+            rg_axi_ctr <= 0;
+            ug_axi_master.aw.drop;
+            drg_axi_rsp_w <= True;
+         end else begin
+            rg_axi_ctr <= rg_axi_ctr + 1;
+         end
 
          if (verbosity > 0) begin
             $display ("%m rl_handle_req_from_axi aw request");
@@ -1098,6 +1120,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             $display ("    wreq: ", fshow (wreq));
             $display ("    local addr: ", fshow (local_addr));
             $display ("    write tuple: ", fshow (write_tuple));
+            $display ("    rg_axi_ctr: ", fshow (rg_axi_ctr));
          end
       end
    endrule
@@ -1115,10 +1138,11 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
       let raw_data = port.read;
       Bit #(TLog #(data_)) data_lshift_amt = truncate (rg_req.va << 3);
       let data = fv_extract_bits (rg_req.va, rg_req.width_code, False, truncate (raw_data));
+      let is_last = rg_axi_ctr == 0;
       ug_axi_master.r.put (AXI4_RFlit { rid: rg_axi_id
                                       , rdata: truncate (data << data_lshift_amt)
                                       , rresp: OKAY
-                                      , rlast: True
+                                      , rlast: is_last
                                       , ruser: 0});
    endrule
 
