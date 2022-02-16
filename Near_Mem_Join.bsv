@@ -157,7 +157,9 @@ module mkNear_Mem_Join (Near_Mem_IFC);
 `endif
                                   });
          w_imem_req_active <= True;
-         $display ("joint mem request");
+         if (rg_verbosity > 0) begin
+            $display ("joint mem request");
+         end
       endmethod
 
       method Action commit;

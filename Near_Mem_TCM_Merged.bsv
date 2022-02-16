@@ -246,8 +246,9 @@ endfunction
 
 `ifdef ISA_A
 // Lifted from elsewhere (L1 WT caches)
-// original function extracted the value from the word using the address - this
-// version doesn't need to
+// (search for fv_amo_op and fn_amo_op)
+// original function extracted the value from the word using the address
+// this version doesn't need to
 function Tuple2 #( Tuple2 #(Bool, Bit #(128))
                  , Tuple2 #(Bool, Bit #(128))) fv_amo_op ( Bit #(3) funct3
                                                          , Bit #(5) funct5
@@ -568,7 +569,8 @@ module mkMergeBRAMs #( Vector #(n_data_, BRAM_PORT_BE #(Bit #(addr_), Bit #(data
                               , Add #(a__, data_, total_data_)
                               , Add #(b__, tags_, total_data_));
    Reg #(Bool) drg_req <- mkDReg (False);
-   rule rl_debug (drg_req);
+   Bool debug = False;
+   rule rl_debug (debug && drg_req);
       $display ("%m mkMergeBRAMs -- read data:");
       for (Integer i = 0; i < valueOf (n_tags_); i = i+1) begin
          $display ("    tag_ports[", i, "].read: ", fshow (tag_ports[i].read));
@@ -982,6 +984,10 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
    Wire #(Bool) dw_exc <- mkDWire (False);
    Wire #(Exc_Code) dw_exc_code <- mkDWire (exc_code_LOAD_ADDR_MISALIGNED);
 
+   // For multi-flit read transactions, we need to make sure that there will
+   // be a free spot in the shims in the next cycle (rather than just the
+   // current cycle)
+   // This is the path of least resistance
    AXI4_Shim #(sid_, addr_, data_, awuser, wuser, buser, aruser, ruser)
       axi_shim <- mkAXI4ShimFF;
    AXI4_Shim #(sid_, addr_, data_, awuser, wuser, buser, aruser, ruser)
@@ -1058,7 +1064,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                                 && !crg_store_pending[0]
                                 && !dw_store_pending
                                 && ug_axi_master.b.canPut
-                                && axi_shim.master.r.canPut);
+                                && axi_shim.master.r.canPut); // check that there will be a free slot
       if (ug_axi_master.ar.canPeek) begin
          let arreq = ug_axi_master.ar.peek;
          // read request
@@ -1135,6 +1141,9 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
 
    // This might be a bit wasteful - we're right-shifting and then left shifting again
    rule rl_handle_r_rsp_to_axi (drg_axi_rsp_r);
+      if (verbosity > 0) begin
+         $display ("%m rl_handle_r_rsp_to_axi");
+      end
       let raw_data = port.read;
       Bit #(TLog #(data_)) data_lshift_amt = truncate (rg_req.va << 3);
       let data = fv_extract_bits (rg_req.va, rg_req.width_code, False, truncate (raw_data));
@@ -1282,7 +1291,9 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
    (* conflict_free = "rl_register_from_cpu, rl_check_commit_from_cpu" *)
    (* execution_order = "rl_register_read, rl_check_commit_from_cpu" *)
    rule rl_check_commit_from_cpu (drg_pending);
-      $display ("%m: rl_check_commit_from_cpu");
+      if (verbosity > 0) begin
+         $display ("%m: rl_check_commit_from_cpu");
+      end
       Bit #(b_addr_) local_addr = fv_cpu_addr_to_local_addr (rg_req.va, valueOf (b_data_only_));
       if ((rg_req.op == CACHE_ST || rg_is_AMO_SC) && dw_commit) begin
          //let write_tuple = fv_mem_req_to_port_req (rg_req);
@@ -1561,12 +1572,17 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                                  };
 
          dw_req_start <= True;
-         $display ("dmem request: ", fshow (addr));
+
+         if (verbosity > 0) begin
+            $display ("dmem request: ", fshow (addr));
+         end
       endmethod
 
       method Action commit;
          dw_commit <= True;
-         $display ("dmem commit");
+         if (verbosity > 0) begin
+            $display ("dmem commit");
+         end
       endmethod
 
       // CPU side: DMem response
