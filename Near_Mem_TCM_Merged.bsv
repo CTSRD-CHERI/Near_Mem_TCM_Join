@@ -121,13 +121,14 @@ endinterface
 (* synthesize *)
 module mkNear_Mem_TCM (Near_Mem_TCM_IFC);
    Bit #(2) i_verbosity = 0;
-   Bit #(2) d_verbosity = 0;
+   Bit #(2) d_bus_verbosity = 1;
+   Bit #(2) d_cpu_verbosity = 0;
 
    FIFOF #(Token) f_reset_rsps <- mkFIFOF1;
 
    // ----------------
    // The TCM instantiation
-   let idtcm <- mkIDTCM_AXI (i_verbosity, d_verbosity);
+   let idtcm <- mkIDTCM_AXI (i_verbosity, d_bus_verbosity, d_cpu_verbosity);
 
    // Fence request/response queues
    FIFOF #(Token) f_fence_req_rsp <- mkFIFOF1;
@@ -304,7 +305,7 @@ endfunction
 
 // An IDTCM module which also has an AXI interface. Requests on the CPU
 // interface take priority over requests on the AXI interface.
-module mkIDTCM_AXI #(Bit #(2) i_verbosity, Bit #(2) d_verbosity)
+module mkIDTCM_AXI #(Bit #(2) i_verbosity, Bit #(2) d_bus_verbosity, Bit #(2) d_cpu_verbosity)
                     (IDTCM_AXI_IFC #( sid_, addr_, data_
                                     , awuser_, wuser_, buser_
                                     , aruser_, ruser_))
@@ -488,7 +489,7 @@ module mkIDTCM_AXI #(Bit #(2) i_verbosity, Bit #(2) d_verbosity)
    let itcm <- mkITCM_from_BRAM (iport, i_verbosity);
    // The data port to the TCM. This port is also used to handle accesses from
    // the fabric
-   let dtcm <- mkDTCM_AXI_from_BRAM (dport, d_verbosity);
+   let dtcm <- mkDTCM_AXI_from_BRAM (dport, d_bus_verbosity, d_cpu_verbosity);
 
    // -------------------------------------------
    // Instruction accesses
@@ -864,7 +865,8 @@ endmodule
 // TODO this currently cannot handle having more than 1 capability in each TCM
 // entry
 module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_be_) port
-                             , Bit #(2) verbosity
+                             , Bit #(2) bus_verbosity
+                             , Bit #(2) cpu_verbosity
                              )
                              (DTCM_AXI_IFC #( sid_, addr_, data_
                                             , awuser, wuser, buser
@@ -1082,12 +1084,12 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
          rg_axi_ctr <= is_last ? 0 : rg_axi_ctr + 1;
          if (is_last) begin
             ug_axi_master.ar.drop;
-            if (verbosity > 0) begin
+            if (bus_verbosity > 0) begin
                $display ("    dropping ar");
             end
          end
 
-         if (verbosity > 0) begin
+         if (bus_verbosity > 0) begin
             $display ("%m rl_handle_req_from_axi ar request");
             $display ("    arreq: ", fshow (arreq));
             $display ("    local addr: ", fshow (local_addr));
@@ -1120,7 +1122,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             rg_axi_ctr <= rg_axi_ctr + 1;
          end
 
-         if (verbosity > 0) begin
+         if (bus_verbosity > 0) begin
             $display ("%m rl_handle_req_from_axi aw request");
             $display ("    awreq: ", fshow (awreq));
             $display ("    wreq: ", fshow (wreq));
@@ -1141,7 +1143,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
 
    // This might be a bit wasteful - we're right-shifting and then left shifting again
    rule rl_handle_r_rsp_to_axi (drg_axi_rsp_r);
-      if (verbosity > 0) begin
+      if (bus_verbosity > 0) begin
          $display ("%m rl_handle_r_rsp_to_axi");
       end
       let raw_data = port.read;
@@ -1161,7 +1163,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
    (* conflict_free = "rl_register_from_cpu, rl_handle_pending_store" *)
    (* execution_order = "rl_handle_pending_store, rl_register_from_cpu" *)
    rule rl_register_from_cpu (dw_req_start);
-      if (verbosity > 0) begin
+      if (cpu_verbosity > 0) begin
          $display ("%m: rl_register_from_cpu");
       end
       rg_req <= dw_req;
@@ -1174,7 +1176,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
          rg_exc <= True;
          rg_exc_code <= dw_req.op == CACHE_LD ? exc_code_LOAD_ADDR_MISALIGNED
                                              : exc_code_STORE_AMO_ADDR_MISALIGNED;
-         if (verbosity > 0) begin
+         if (cpu_verbosity > 0) begin
             $display ("    requested misaligned access");
             $display ("    req: ", fshow (dw_req));
          end
@@ -1185,7 +1187,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             if (is_AMO_LR) begin
                rg_lrsc_valid <= True;
                rg_lrsc_addr <= dw_req.va;
-               if (verbosity > 0) begin
+               if (cpu_verbosity > 0) begin
                   $display ("    LR reserving addr: ", fshow (dw_req.va));
                end
             end
@@ -1195,7 +1197,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                pending = True;
                rg_pending <= True;
                rg_lrsc_valid <= False;
-               if (verbosity > 0) begin
+               if (cpu_verbosity > 0) begin
                   $display ("    ISA_A invalidating addr: ", fshow (dw_req.va), " due to AMO request");
                end
             end
@@ -1204,12 +1206,12 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
 
             Bit #(b_addr_) store_local_addr = fv_cpu_addr_to_local_addr (rg_store_addr, valueOf (b_data_only_));
             if (crg_store_pending[0] && local_addr == store_local_addr) begin
-               if (verbosity > 0) begin
+               if (cpu_verbosity > 0) begin
                   $display ("    address matches buffer; forwarding from buffer");
                end
                drg_read_from_buffer <= True;
             end else begin
-               if (verbosity > 0) begin
+               if (cpu_verbosity > 0) begin
                   $display ("    address does not match buffer; not forwarding");
                end
             end
@@ -1217,7 +1219,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             // less than we're reading now
             port.put (0, local_addr, ?);
 
-            if (verbosity > 0) begin
+            if (cpu_verbosity > 0) begin
                $display ("    requesting data from BRAM");
                $display ("    cpu addr: ", fshow (dw_req.va));
                $display ("    req: ", fshow (dw_req));
@@ -1233,7 +1235,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             if (rg_lrsc_valid && dw_req.op == CACHE_ST && dw_req.va == rg_lrsc_addr) begin
                lrsc_valid_new = False;
                do_write = True;
-               if (verbosity > 0) begin
+               if (cpu_verbosity > 0) begin
                   $display ("    cancelling LRSC reservation, reserved addr: ", fshow (rg_lrsc_addr),
                             "  requested addr", fshow (dw_req.va));
                end
@@ -1241,12 +1243,12 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                lrsc_valid_new = False;
                if (!rg_lrsc_valid) begin
                   do_write = False;
-                  if (verbosity > 0) begin
+                  if (cpu_verbosity > 0) begin
                      $display ("    no valid LRSC reservation, requested addr: ", fshow (dw_req.va));
                   end
                end else if (dw_req.va != rg_lrsc_addr) begin
                   do_write = False;
-                  if (verbosity > 0) begin
+                  if (cpu_verbosity > 0) begin
                      $display ("    SC addr does not match reservation. Reserved: ", fshow (rg_lrsc_addr),
                                "  requested: ", fshow (dw_req.va));
                   end
@@ -1256,7 +1258,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             end
             rg_lrsc_valid <= lrsc_valid_new;
 `endif
-            if (verbosity > 0) begin
+            if (cpu_verbosity > 0) begin
                $display ("    requesting write to BRAM");
                $display ("    cpu addr: ", fshow (dw_req.va));
                $display ("    req: ", fshow (dw_req));
@@ -1269,7 +1271,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             Tuple2 #(Bool, Bit #(XLEN_2)) new_rg_store_val = tuple2 (tpl_1 (dw_req.st_value), truncate (tpl_2 (dw_req.st_value)));
             rg_store_val <= new_rg_store_val;
             rg_store_width_code <= dw_req.width_code;
-            if (verbosity > 0) begin
+            if (cpu_verbosity > 0) begin
                $display ("    adding new store to buffer");
                $display ("    do_write: ", fshow (do_write));
                $display ("    addr: ", fshow (dw_req.va));
@@ -1291,7 +1293,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
    (* conflict_free = "rl_register_from_cpu, rl_check_commit_from_cpu" *)
    (* execution_order = "rl_register_read, rl_check_commit_from_cpu" *)
    rule rl_check_commit_from_cpu (drg_pending);
-      if (verbosity > 0) begin
+      if (cpu_verbosity > 0) begin
          $display ("%m: rl_check_commit_from_cpu");
       end
       Bit #(b_addr_) local_addr = fv_cpu_addr_to_local_addr (rg_req.va, valueOf (b_data_only_));
@@ -1301,7 +1303,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
          //Bit #(b_data_) data = zeroExtend (tpl_2 (rg_req.st_value) & fv_size_code_to_mask (rg_req.width_code)) << low_bit;
          //Bit #(TLog #(caps_in_data_floor_)) tag_bit = truncate (rg_req.va >> valueOf (TLog #(TDiv #(TSub #(SizeOf #(CapMem), 1), SizeOf #(Byte)))));
          //Bit #(TLog #(b_data_)) tag_index = zeroExtend (tag_bit) + fromInteger (valueOf (b_data_only_));
-         //if (verbosity > 0) begin
+         //if (cpu_verbosity > 0) begin
          //   $display ("    requesting write to BRAM");
          //   $display ("    raw req: ", fshow (rg_req));
          //   $display ("    local addr: ", fshow (local_addr));
@@ -1316,7 +1318,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
 `endif
              ) begin
             crg_store_accepted[0] <= True;
-            if (verbosity > 0) begin
+            if (cpu_verbosity > 0) begin
                $display ("    accepting write");
                $display ("    dw_store_pending: ", fshow (dw_store_pending));
                $display ("    rg_store_val: ", fshow (rg_store_val));
@@ -1350,7 +1352,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
          end
 `endif
 
-         if (verbosity > 0) begin
+         if (cpu_verbosity > 0) begin
             $display ("    committing read");
             $display ("    cpu addr: ", fshow (rg_req.va));
             $display ("    local addr: ", fshow (local_addr));
@@ -1393,7 +1395,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                                                , width_code: rg_store_width_code};
                let write_tuple_old = fv_mem_req_to_port_req (tmp_req_old);
                port.put (tpl_1 (write_tuple_old), tpl_2 (write_tuple_old), tpl_3 (write_tuple_old));
-               if (verbosity > 0) begin
+               if (cpu_verbosity > 0) begin
                   $display ("    performed pending store");
                   $display ("    write_tuple_old: ", fshow (write_tuple_old));
                end
@@ -1414,7 +1416,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
             rg_store_width_code <= rg_req.width_code;
             rg_store_val <= tuple2 (tpl_1 (new_st_val), truncate (tpl_2 (new_st_val)));
 
-            if (verbosity > 0) begin
+            if (cpu_verbosity > 0) begin
                //$display ("    committing other AMO request");
                $display ("    buffering other AMO request");
                $display ("    request: ", fshow (rg_req));
@@ -1451,7 +1453,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
          read_val = port.read;
       end
       crg_tcm_out[0] <= read_val;
-      if (verbosity > 0) begin
+      if (cpu_verbosity > 0) begin
          $display ("%m: rl_register_read");
          $display ("    drg_read_from_buffer: ", fshow (drg_read_from_buffer));
          $display ("    bram data: ", fshow (port.read));
@@ -1463,7 +1465,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
    endrule
 
    rule rl_drive_exc_rsp (rg_exc);
-      if (verbosity > 0) begin
+      if (cpu_verbosity > 0) begin
          $display ("%m: rl_drive_exc_rsp");
          $display ("    code: ", fshow (rg_exc_code));
       end
@@ -1473,7 +1475,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
    endrule
 
    rule rl_drive_rsp (rg_started && !rg_pending && !rg_exc);
-      if (verbosity > 0) begin
+      if (cpu_verbosity > 0) begin
          $display ("%m: rl_drive_rsp");
          $display ("    raw response: ", fshow (crg_tcm_out[1]));
          let raw_data = crg_tcm_out[1];
@@ -1491,7 +1493,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
                                  && (!dw_req_start || dw_req.op == CACHE_ST)
                                  && !(drg_pending && rg_req.op == CACHE_AMO && !rg_is_AMO_LR && !rg_is_AMO_SC));
                                  // do the actual request
-      if (verbosity > 0) begin
+      if (cpu_verbosity > 0) begin
          $display ("%m: rl_handle_pending_store");
       end
 
@@ -1504,7 +1506,7 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
       let write_tuple = fv_mem_req_to_port_req (tmp_req);
       port.put (tpl_1 (write_tuple), tpl_2 (write_tuple), tpl_3 (write_tuple));
       crg_store_pending[0] <= False;
-      if (verbosity > 0) begin
+      if (cpu_verbosity > 0) begin
          $display ("    performing pending store");
          $display ("    write_tuple: ", fshow (write_tuple));
       end
@@ -1573,14 +1575,14 @@ module mkDTCM_AXI_from_BRAM #( BRAM_PORT_BE #(Bit #(b_addr_), Bit #(b_data_), b_
 
          dw_req_start <= True;
 
-         if (verbosity > 0) begin
+         if (cpu_verbosity > 0) begin
             $display ("dmem request: ", fshow (addr));
          end
       endmethod
 
       method Action commit;
          dw_commit <= True;
-         if (verbosity > 0) begin
+         if (cpu_verbosity > 0) begin
             $display ("dmem commit");
          end
       endmethod
